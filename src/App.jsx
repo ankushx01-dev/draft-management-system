@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
+import { useDispatch, useSelector } from 'react-redux'
 import {
   Archive,
   ArrowLeft,
@@ -15,21 +16,25 @@ import {
   Trash2,
   X,
 } from 'lucide-react'
+import { postAdded, postRemoved, postUpdated, postsHydrated, postsSelectors } from './store/postsSlice'
+import { platformSelected, platformsSelectors } from './store/platformsSlice'
 
 const STORAGE_KEY = 'draftly-drafts'
-const EMPTY_FORM = { title: '', content: '' }
+const EMPTY_FORM = { title: '', content: '', platformId: 'general' }
 
 const seedDrafts = [
   {
     id: 'welcome-to-draftly',
     title: 'Welcome to Draftly',
     content: 'A simple space to capture ideas, shape your thoughts, and ship your best work.',
+    platformId: 'general',
     updatedAt: new Date(Date.now() - 1000 * 60 * 42).toISOString(),
   },
   {
     id: 'weekend-reading-list',
     title: 'Weekend reading list',
     content: 'Three essays to read this weekend and a few notes on why they are worth your time.',
+    platformId: 'general',
     updatedAt: new Date(Date.now() - 1000 * 60 * 60 * 25).toISOString(),
   },
 ]
@@ -59,7 +64,10 @@ function excerpt(content) {
 }
 
 function App() {
-  const [drafts, setDrafts] = useState([])
+  const dispatch = useDispatch()
+  const drafts = useSelector(postsSelectors.selectAll)
+  const platforms = useSelector(platformsSelectors.selectAll)
+  const selectedPlatformId = useSelector((state) => state.platforms.selectedId)
   const [form, setForm] = useState(EMPTY_FORM)
   const [editingId, setEditingId] = useState(null)
   const [query, setQuery] = useState('')
@@ -72,11 +80,11 @@ function App() {
   useEffect(() => {
     const load = async () => {
       await wait(450)
-      setDrafts(readDrafts())
+      dispatch(postsHydrated(readDrafts()))
       setLoading(false)
     }
-    load()
-  }, [])
+    void load()
+  }, [dispatch])
 
   useEffect(() => {
     if (!loading) localStorage.setItem(STORAGE_KEY, JSON.stringify(drafts))
@@ -89,7 +97,7 @@ function App() {
 
   const selectDraft = useCallback((draft) => {
     setEditingId(draft.id)
-    setForm({ title: draft.title, content: draft.content })
+    setForm({ title: draft.title, content: draft.content, platformId: draft.platformId || 'general' })
     window.scrollTo({ top: 0, behavior: 'smooth' })
   }, [])
 
@@ -112,12 +120,10 @@ function App() {
     await wait(500)
     const updatedAt = new Date().toISOString()
     if (editingId) {
-      setDrafts((current) =>
-        current.map((draft) => (draft.id === editingId ? { ...draft, title, content, updatedAt } : draft)),
-      )
+      dispatch(postUpdated({ id: editingId, changes: { title, content, updatedAt, platformId: form.platformId } }))
       showNotice('Draft updated successfully.')
     } else {
-      setDrafts((current) => [{ id: crypto.randomUUID(), title, content, updatedAt }, ...current])
+      dispatch(postAdded({ id: crypto.randomUUID(), title, content, updatedAt, platformId: form.platformId }))
       showNotice('Draft saved successfully.')
     }
     setForm(EMPTY_FORM)
@@ -128,7 +134,7 @@ function App() {
   const deleteDraft = async (id) => {
     setSaving(true)
     await wait(300)
-    setDrafts((current) => current.filter((draft) => draft.id !== id))
+    dispatch(postRemoved(id))
     if (editingId === id) startNewDraft()
     setSaving(false)
     showNotice('Draft deleted.')
@@ -138,9 +144,10 @@ function App() {
     const normalized = query.toLowerCase().trim()
     return drafts
       .filter((draft) => activeView === 'all' || Date.now() - new Date(draft.updatedAt) < 86400000 * 7)
+      .filter((draft) => selectedPlatformId === 'all' || draft.platformId === selectedPlatformId)
       .filter((draft) => !normalized || `${draft.title} ${draft.content}`.toLowerCase().includes(normalized))
       .sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt))
-  }, [drafts, query, activeView])
+  }, [drafts, query, activeView, selectedPlatformId])
 
   const recentCount = drafts.filter((draft) => Date.now() - new Date(draft.updatedAt) < 86400000 * 7).length
 
@@ -169,6 +176,17 @@ function App() {
           <button className={`nav-item ${activeView === 'recent' ? 'active' : ''}`} onClick={() => { setActiveView('recent'); setMobileNavOpen(false) }}>
             <Clock3 size={18} /> Recently edited <span className="count">{recentCount}</span>
           </button>
+          <div className="sidebar-heading platform-heading">Platforms</div>
+          {platforms.map((platform) => (
+            <button
+              className={`nav-item platform-item ${selectedPlatformId === platform.id ? 'active' : ''}`}
+              key={platform.id}
+              onClick={() => { dispatch(platformSelected(platform.id)); setMobileNavOpen(false) }}
+            >
+              <span className="platform-dot" style={{ backgroundColor: platform.color }} />
+              {platform.name}
+            </button>
+          ))}
           <div className="sidebar-bottom">
             <div className="storage-card"><Archive size={17} /><div><strong>Local storage</strong><span>Your drafts stay private</span></div><Check size={15} className="check" /></div>
             <div className="sidebar-tip"><Sparkles size={16} /><p><strong>Keep creating.</strong><br />Great ideas start as drafts.</p></div>
@@ -186,7 +204,15 @@ function App() {
             <form onSubmit={saveDraft}>
               <input className="title-input" value={form.title} onChange={(event) => setForm({ ...form, title: event.target.value })} placeholder="Give your draft a title..." maxLength={100} />
               <textarea className="content-input" value={form.content} onChange={(event) => setForm({ ...form, content: event.target.value })} placeholder="Start writing your thoughts here..." rows={5} />
-              <div className="editor-footer"><span>{form.content.length} characters</span><button className="save-button" disabled={saving}>{saving ? 'Saving...' : editingId ? 'Update draft' : 'Save as draft'} <Check size={16} /></button></div>
+              <div className="editor-footer">
+                <span>{form.content.length} characters</span>
+                <label className="platform-select">Platform
+                  <select value={form.platformId} onChange={(event) => setForm({ ...form, platformId: event.target.value })}>
+                    {platforms.filter((platform) => platform.id !== 'all').map((platform) => <option value={platform.id} key={platform.id}>{platform.name}</option>)}
+                  </select>
+                </label>
+                <button className="save-button" disabled={saving}>{saving ? 'Saving...' : editingId ? 'Update draft' : 'Save as draft'} <Check size={16} /></button>
+              </div>
             </form>
           </section>
 
